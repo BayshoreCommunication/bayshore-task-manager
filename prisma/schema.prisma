@@ -1,0 +1,515 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserRole {
+  admin
+  o_level
+  manager
+  assistant_manager
+  executive
+}
+
+enum UserTheme {
+  dark
+  light
+}
+
+enum TaskStatus {
+  pending
+  in_progress
+  done
+  blocked
+}
+
+enum TaskPriority {
+  very_high
+  high
+  medium
+  low
+}
+
+enum TaskType {
+  universal
+  private
+  personal
+}
+
+enum ProjectStatus {
+  in_pipeline
+  in_onboarding
+  active
+  done
+  expired
+  canceled
+}
+
+enum AttachmentType {
+  link
+  image
+  pdf
+}
+
+enum LogEntryType {
+  task_created
+  task_edited
+  task_status
+  task_priority
+  task_due
+  task_muted
+  task_unmuted
+  comment
+  user_created
+  user_edited
+  user_muted
+  user_unmuted
+  report
+  report_edited
+  login
+  settings
+  vault_created
+  vault_edited
+  vault_deleted
+}
+
+model User {
+  id               String   @id @default(cuid())
+  name             String
+  email            String   @unique
+  password         String   // bcrypt hash — never store plaintext
+  role             UserRole @default(executive)
+  designation      String   @default("")
+  department       String   @default("")
+  responsibilities String   @default("")
+  avatar           String?
+  muted            Boolean  @default(false)
+  sessionVersion   Int      @default(0) // for invalidating sessions on password change or role update
+  theme            UserTheme @default(dark)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  // Relations
+  createdTasks       Task[]              @relation("TaskCreator")
+  assignedTasks      TaskAssignee[]
+  comments           Comment[]
+  attachmentsAdded   Attachment[]
+  dailyReports       DailyReport[]
+  notifications      Notification[]
+  logEntriesActed    LogEntry[]          @relation("LogActor")
+  monthlyCompletions MonthlyCompletion[]
+  createdMonthly     MonthlyTask[]       @relation("MonthlyCreator")
+  monthlyAssignees   MonthlyTaskAssignee[]
+  projectsCreated    Project[]           @relation("ProjectCreator")
+  projectMembers     ProjectMember[]
+  projectDocsAdded   ProjectDoc[]
+  vaultCreated       VaultEntry[]        @relation("VaultCreator")
+  vaultAccess        VaultAccessEntry[]
+
+  @@index([email])
+  @@index([role])
+  @@index([muted])
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SESSION  (lightweight — replace with NextAuth or better-auth in production)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// model Session {
+//   id        String   @id @default(cuid())
+//   userId    String
+//   token     String   @unique @default(cuid())
+//   expiresAt DateTime
+//   createdAt DateTime @default(now())
+
+//   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+//   @@index([token])
+//   @@index([userId])
+// }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TASK
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Task {
+  id          String       @id @default(cuid())
+  title       String
+  details     String       @default("")
+  priority    TaskPriority @default(medium)
+  status      TaskStatus   @default(pending)
+  type        TaskType     @default(universal)
+  dueDate     DateTime?
+  completedAt DateTime?
+  muted       Boolean      @default(false)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  // Foreign keys
+  createdById String
+  projectId   String?
+
+  // Relations
+  createdBy   User           @relation("TaskCreator", fields: [createdById], references: [id])
+  project     Project?       @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  assignees   TaskAssignee[]
+  comments    Comment[]
+  attachments Attachment[]
+  logEntries  LogEntry[]
+
+  @@index([status])
+  @@index([priority])
+  @@index([type])
+  @@index([createdById])
+  @@index([projectId])
+  @@index([dueDate])
+  @@index([muted])
+}
+
+// Junction: Task ↔ User (assignees)
+model TaskAssignee {
+  taskId String
+  userId String
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([taskId, userId])
+  @@index([userId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COMMENT
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Comment {
+  id        String   @id @default(cuid())
+  text      String
+  createdAt DateTime @default(now())
+
+  // Foreign keys
+  taskId String
+  userId String
+
+  // Relations
+  task        Task              @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  user        User              @relation(fields: [userId], references: [id])
+  attachments CommentLink[]     // links attached to comments
+
+  @@index([taskId])
+  @@index([userId])
+}
+
+// Comment links (only type "link" is supported per the app spec)
+model CommentLink {
+  id        String @id @default(cuid())
+  url       String
+  commentId String
+
+  comment Comment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+
+  @@index([commentId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ATTACHMENT  (file/link attached to a task)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Attachment {
+  id        String         @id @default(cuid())
+  type      AttachmentType
+  name      String
+  url       String?        // for type = link
+  fileKey   String?        // S3/R2 object key for image/pdf (replace base64 in prod)
+  mimeType  String?        // e.g. "application/pdf", "image/png"
+  sizeBytes Int?
+  createdAt DateTime       @default(now())
+
+  // Foreign keys
+  taskId    String
+  addedById String
+
+  // Relations
+  task    Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  addedBy User @relation(fields: [addedById], references: [id])
+
+  @@index([taskId])
+  @@index([addedById])
+  @@index([type])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MONTHLY TASK
+// ─────────────────────────────────────────────────────────────────────────────
+
+model MonthlyTask {
+  id        String       @id @default(cuid())
+  title     String
+  details   String       @default("")
+  dueDay    Int          // day of month: 1–28
+  priority  TaskPriority @default(medium)
+  muted     Boolean      @default(false)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  // Foreign keys
+  createdById String
+
+  // Relations
+  createdBy   User                  @relation("MonthlyCreator", fields: [createdById], references: [id])
+  assignees   MonthlyTaskAssignee[] // empty = everyone
+  completions MonthlyCompletion[]
+
+  @@index([muted])
+  @@index([createdById])
+}
+
+// Junction: MonthlyTask ↔ User (specific assignees; empty = everyone)
+model MonthlyTaskAssignee {
+  monthlyTaskId String
+  userId        String
+
+  monthlyTask MonthlyTask @relation(fields: [monthlyTaskId], references: [id], onDelete: Cascade)
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([monthlyTaskId, userId])
+  @@index([userId])
+}
+
+// Each person's monthly completion record
+model MonthlyCompletion {
+  id            String   @id @default(cuid())
+  month         String   // "YYYY-MM" e.g. "2026-04"
+  completedAt   DateTime @default(now())
+
+  // Foreign keys
+  monthlyTaskId String
+  userId        String
+
+  monthlyTask MonthlyTask @relation(fields: [monthlyTaskId], references: [id], onDelete: Cascade)
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([monthlyTaskId, userId, month]) // one completion per person per month
+  @@index([monthlyTaskId])
+  @@index([userId])
+  @@index([month])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PROJECT
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Project {
+  id          String        @id @default(cuid())
+  name        String
+  description String        @default("")
+  color       String        @default("#4f8ef7") // hex color
+  status      ProjectStatus @default(in_pipeline)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  // Foreign keys
+  createdById String
+
+  // Relations
+  createdBy User            @relation("ProjectCreator", fields: [createdById], references: [id])
+  members   ProjectMember[]
+  tasks     Task[]
+  docs      ProjectDoc[]
+
+  @@index([status])
+  @@index([createdById])
+}
+
+// Junction: Project ↔ User (members)
+model ProjectMember {
+  projectId String
+  userId    String
+  joinedAt  DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([projectId, userId])
+  @@index([userId])
+}
+
+// Documents attached to a project (agreements, work plans, PDFs, links)
+model ProjectDoc {
+  id        String         @id @default(cuid())
+  name      String
+  type      AttachmentType
+  url       String?        // for type = link
+  fileKey   String?        // S3/R2 object key for image/pdf
+  mimeType  String?
+  sizeBytes Int?
+  createdAt DateTime       @default(now())
+
+  // Foreign keys
+  projectId String
+  addedById String
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  addedBy User    @relation(fields: [addedById], references: [id])
+
+  @@index([projectId])
+  @@index([addedById])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CREDENTIALS VAULT
+// ─────────────────────────────────────────────────────────────────────────────
+
+model VaultEntry {
+  id             String   @id @default(cuid())
+  client         String   // folder name e.g. "Bully Project"
+  platform       String   // e.g. "Shopify", "cPanel"
+  username       String
+  passwordEnc    String   // AES-256 encrypted — NEVER store plaintext
+  url            String   @default("")
+  notes          String   @default("")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  // Foreign keys
+  createdById String
+
+  // Relations
+  createdBy   User               @relation("VaultCreator", fields: [createdById], references: [id])
+  accessList  VaultAccessEntry[] // empty = admin+o_level only
+  logEntries  LogEntry[]
+
+  @@index([client])
+  @@index([createdById])
+}
+
+// Junction: VaultEntry ↔ User (who has explicit access)
+model VaultAccessEntry {
+  vaultId String
+  userId  String
+
+  vault VaultEntry @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  user  User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([vaultId, userId])
+  @@index([userId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DAILY REPORT
+// ─────────────────────────────────────────────────────────────────────────────
+
+model DailyReport {
+  id        String   @id @default(cuid())
+  date      DateTime @db.Date // report date (no time component)
+  content   String             // today's accomplishments
+  plan      String   @default("") // plan for tomorrow
+  blockers  String   @default("") // blockers
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  // Foreign keys
+  userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  hours     HourEntry[]
+  @@unique([userId, date]) // one report per user per day
+  @@index([userId])
+  @@index([date])
+}
+
+model HourEntry {
+  id           String      @id @default(cuid())
+  hour         Int         // 0–23
+  note         String
+  dailyReportId String
+  dailyReport  DailyReport @relation(fields: [dailyReportId], references: [id], onDelete: Cascade)
+  @@unique([dailyReportId, hour])  // one entry per hour per report
+  @@index([dailyReportId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NOTIFICATION
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Notification {
+  id        String   @id @default(cuid())
+  message   String
+  linkPage  String?  // e.g. "/tasks", "/vault"
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  // Foreign keys
+  targetUserId String
+
+  targetUser User @relation(fields: [targetUserId], references: [id], onDelete: Cascade)
+
+  @@index([targetUserId, read])
+  @@index([createdAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ACTIVITY LOG
+// ─────────────────────────────────────────────────────────────────────────────
+
+model LogEntry {
+  id        String       @id @default(cuid())
+  type      LogEntryType
+  message   String
+  details   String       @default("")
+  ico       String       @default("📌")
+  createdAt DateTime     @default(now())
+
+  // Foreign keys (actor is nullable for system events)
+  actorId    String?
+  taskId     String?
+  vaultId    String?
+
+  // Relations
+  actor User?        @relation("LogActor", fields: [actorId], references: [id], onDelete: SetNull)
+  task  Task?      @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  vault VaultEntry? @relation(fields: [vaultId], references: [id], onDelete: SetNull)
+
+  @@index([actorId])
+  @@index([taskId])
+  @@index([vaultId])
+  @@index([type])
+  @@index([createdAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PERMISSIONS  (one row per role — 5 rows total)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model RolePermission {
+  id                String   @id @default(cuid())
+  role              UserRole @unique // one row per role
+  createTask        Boolean  @default(false)
+  editTask          Boolean  @default(false)
+  updateStatus      Boolean  @default(true)
+  createAccount     Boolean  @default(false)
+  viewReports       Boolean  @default(false)
+  viewKpi           Boolean  @default(false)
+  viewUniversal     Boolean  @default(false)
+  viewDailyReports  Boolean  @default(false)
+  viewVault         Boolean  @default(false)
+  manageVault       Boolean  @default(false)
+  managePermissions Boolean  @default(false)
+  updatedAt         DateTime @updatedAt
+
+  @@index([role])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BRAND / APP SETTINGS  (single-row config table)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model AppSettings {
+  id        String   @id @default("singleton") // always one row
+  appName   String   @default("Bayshore OS")
+  logoUrl   String?  // CDN URL for logo image
+  updatedAt DateTime @updatedAt
+}
