@@ -9,6 +9,9 @@ import prisma from "@/lib/prisma";
 // ⚠️ Remove this route (and the DEBUG_LIST_KEY env var) once you're done testing. Call it as:
 //   GET /api/debug-list?key=<DEBUG_LIST_KEY>
 // A wrong or missing key, or an unset env var, is a plain 404.
+//
+// Diagnostic (no secret leaked): GET /api/debug-list?probe=1 → tells whether the env var is set
+// and its length, so a trailing space/newline in the dashboard value can be spotted.
 
 const notFound = () => new NextResponse("Not found", { status: 404 });
 
@@ -20,11 +23,17 @@ const sameKey = (given: string, secret: string) => {
 };
 
 export async function GET(req: Request) {
-  const secret = process.env.DEBUG_LIST_KEY;
+  const url = new URL(req.url);
+  const secret = (process.env.DEBUG_LIST_KEY ?? "").trim();
+
+  // Harmless health check — reveals only whether a key is configured and its length.
+  if (url.searchParams.get("probe") === "1") {
+    return NextResponse.json({ keyConfigured: secret.length > 0, keyLength: secret.length });
+  }
+
   if (!secret) return notFound();
 
-  const url = new URL(req.url);
-  const given = url.searchParams.get("key") ?? req.headers.get("x-debug-key") ?? "";
+  const given = (url.searchParams.get("key") ?? req.headers.get("x-debug-key") ?? "").trim();
   if (!sameKey(given, secret)) return notFound();
 
   const users = await prisma.user.findMany({
